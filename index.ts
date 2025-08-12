@@ -22,7 +22,37 @@ function getMimeType(filePath: string): string {
   return file.type || 'application/x-unknown';
 }
 
-function getRootResources(): DocResource[] {
+async function getFileDescription(
+  filePath: string,
+  fileName: string
+): Promise<string> {
+  // For .md files, try to get first line as description
+  if (fileName.endsWith('.md')) {
+    try {
+      const file = Bun.file(filePath);
+      // Use slice to read only first 500 bytes
+      const partial = file.slice(0, 500);
+      const text = await partial.text();
+
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) {
+          // Remove markdown headers if present
+          return trimmed.replace(/^#+\s*/, '');
+        }
+      }
+      return `File: ${fileName}`;
+    } catch {
+      return `File: ${fileName}`;
+    }
+  }
+
+  // For other files, use the current format
+  return `File: ${fileName}`;
+}
+
+async function getRootResources(): Promise<DocResource[]> {
   const resources: DocResource[] = [];
 
   // Check if docs directory exists
@@ -42,14 +72,14 @@ function getRootResources(): DocResource[] {
       if (entry.isDirectory()) {
         resources.push({
           uri: `bun-doc://${name}`,
-          description: `Directory: ${name}`,
+          description: '',
           mimeType: 'text/directory',
         });
       } else if (entry.isFile()) {
         const fullPath = join(DOCS_DIR, name);
         resources.push({
           uri: `bun-doc://${name}`,
-          description: `File: ${name}`,
+          description: await getFileDescription(fullPath, name),
           mimeType: getMimeType(fullPath),
         });
       }
@@ -61,7 +91,7 @@ function getRootResources(): DocResource[] {
   return resources;
 }
 
-function getDirectoryContents(dirPath: string): DocResource[] {
+async function getDirectoryContents(dirPath: string): Promise<DocResource[]> {
   const resources: DocResource[] = [];
   const fullPath = join(DOCS_DIR, dirPath);
 
@@ -78,14 +108,14 @@ function getDirectoryContents(dirPath: string): DocResource[] {
       if (entry.isDirectory()) {
         resources.push({
           uri: `bun-doc://${subPath}`,
-          description: `Directory: ${subPath}`,
+          description: '',
           mimeType: 'text/directory',
         });
       } else if (entry.isFile()) {
         const filePath = join(fullPath, name);
         resources.push({
           uri: `bun-doc://${subPath}`,
-          description: `File: ${subPath}`,
+          description: await getFileDescription(filePath, name),
           mimeType: getMimeType(filePath),
         });
       }
@@ -110,7 +140,12 @@ const server = new Server(
 );
 
 // Initialize root resources
-const rootResources = getRootResources();
+let rootResources: DocResource[] = [];
+
+// Load resources on startup
+await getRootResources().then((resources) => {
+  rootResources = resources;
+});
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   return {
@@ -131,7 +166,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
     if (stat.isDirectory()) {
       // Handle directory
-      const contents = getDirectoryContents(path);
+      const contents = await getDirectoryContents(path);
       return {
         contents: [
           {
