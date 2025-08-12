@@ -1,107 +1,76 @@
----
+# Bun Documentation MCP Server
 
-Default to using Bun instead of Node.js.
+This is a Model Context Protocol (MCP) server that provides access to Bun documentation through a file system-like interface.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Bun automatically loads .env, so don't use dotenv.
+## Project Overview
 
-## APIs
+This MCP server acts as a file system proxy for the Bun documentation located in `node_modules/bun-types/docs/`. It allows AI assistants to browse and read Bun documentation progressively, reducing unnecessary information transfer.
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+## Architecture
 
-## Testing
+- **Protocol**: MCP (Model Context Protocol)
+- **Runtime**: Bun
+- **Main file**: `index.ts`
+- **Documentation source**: `node_modules/bun-types/docs/`
 
-Use `bun test` to run tests.
+## Key Features
 
-```ts#index.test.ts
-import { test, expect } from "bun:test";
+1. **Progressive Loading**: Only loads requested directories and files, not the entire documentation tree
+2. **File System Interface**: Uses familiar URIs like `bun-doc://api/sqlite.md`
+3. **Automatic MIME Type Detection**: Uses Bun's native `file.type` for accurate MIME types
+4. **Directory Browsing**: Returns JSON-formatted directory listings
+5. **Text File Support**: Reads and returns content of text files
 
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+## Technical Decisions
+
+### URI Format
+- Files keep their extensions: `bun-doc://quickstart.md`
+- Directories have no special markers: `bun-doc://api`
+- Follows standard file system conventions
+
+### MIME Types
+- Directories in listings: `inode/directory`
+- Directory contents when read: `text/directory`
+- Files: Detected automatically using `Bun.file().type`
+
+### API Usage
+- Uses `Bun.file()` for file operations and MIME detection
+- Uses `node:fs` for directory operations (as recommended by Bun docs)
+- Minimal dependencies - only MCP SDK required
+
+## Development Guidelines
+
+### Code Style
+- Keep responses concise - this is a CLI tool
+- No unnecessary comments in code
+- Follow existing patterns in the codebase
+
+### Performance
+- Use Bun's native APIs where available
+- Minimize system calls
+- Lazy loading - don't read until requested
+
+### Testing
+Run the server locally:
+```bash
+bun run index.ts
 ```
 
-## Frontend
+## MCP Integration
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+This server implements:
+- `ListResourcesRequestSchema`: Returns root directory contents
+- `ReadResourceRequestSchema`: Returns file content or directory listing
 
-Server:
+## Future Improvements
 
-```ts#index.ts
-import index from "./index.html"
+Potential enhancements could include:
+- Caching frequently accessed files
+- Search functionality using Bun.glob
+- Support for resource subscriptions
+- Markdown parsing for better structured data
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
+## Important Notes
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-
-// import .css files directly and it works
-import './index.css';
-
-import { createRoot } from "react-dom/client";
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
+- Always consult Bun documentation before making modifications
+- Use pure Bun APIs whenever possible to complete tasks
