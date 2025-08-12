@@ -13,6 +13,7 @@ const DOCS_DIR = join(process.cwd(), 'node_modules', 'bun-types', 'docs');
 
 interface DocResource {
   uri: string;
+  name: string;
   description: string;
   mimeType: string;
 }
@@ -52,48 +53,19 @@ async function getFileDescription(
   return `File: ${fileName}`;
 }
 
-async function getRootResources(): Promise<DocResource[]> {
+async function scanDirectory(
+  relativePath: string = ''
+): Promise<DocResource[]> {
   const resources: DocResource[] = [];
+  const fullPath = relativePath ? join(DOCS_DIR, relativePath) : DOCS_DIR;
 
-  // Check if docs directory exists
-  if (!existsSync(DOCS_DIR)) {
-    console.error(`Docs directory not found: ${DOCS_DIR}`);
+  // Check if directory exists
+  if (!existsSync(fullPath)) {
+    if (!relativePath) {
+      console.error(`Docs directory not found: ${fullPath}`);
+    }
     return resources;
   }
-
-  try {
-    const entries = readdirSync(DOCS_DIR, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const name = entry.name;
-      // Skip hidden files
-      if (name.startsWith('.')) continue;
-
-      if (entry.isDirectory()) {
-        resources.push({
-          uri: `bun-doc://${name}`,
-          description: '',
-          mimeType: 'text/directory',
-        });
-      } else if (entry.isFile()) {
-        const fullPath = join(DOCS_DIR, name);
-        resources.push({
-          uri: `bun-doc://${name}`,
-          description: await getFileDescription(fullPath, name),
-          mimeType: getMimeType(fullPath),
-        });
-      }
-    }
-  } catch (error) {
-    console.error('Error reading docs directory:', error);
-  }
-
-  return resources;
-}
-
-async function getDirectoryContents(dirPath: string): Promise<DocResource[]> {
-  const resources: DocResource[] = [];
-  const fullPath = join(DOCS_DIR, dirPath);
 
   try {
     const entries = readdirSync(fullPath, { withFileTypes: true });
@@ -103,29 +75,64 @@ async function getDirectoryContents(dirPath: string): Promise<DocResource[]> {
       // Skip hidden files
       if (name.startsWith('.')) continue;
 
-      const subPath = dirPath ? `${dirPath}/${name}` : name;
+      const resourcePath = relativePath ? `${relativePath}/${name}` : name;
 
       if (entry.isDirectory()) {
         resources.push({
-          uri: `bun-doc://${subPath}`,
+          uri: `bun-doc://${resourcePath}`,
+          name: name,
           description: '',
           mimeType: 'text/directory',
         });
       } else if (entry.isFile()) {
         const filePath = join(fullPath, name);
         resources.push({
-          uri: `bun-doc://${subPath}`,
+          uri: `bun-doc://${resourcePath}`,
+          name: name,
           description: await getFileDescription(filePath, name),
           mimeType: getMimeType(filePath),
         });
       }
     }
-  } catch {
-    // Directory doesn't exist or can't be read
+  } catch (error) {
+    if (!relativePath) {
+      console.error('Error reading docs directory:', error);
+    }
   }
 
   return resources;
 }
+
+// Load resources first
+const rootResources = await scanDirectory();
+
+// Generate dynamic instructions based on available directories
+function generateInstructions(): string {
+  return `This MCP server provides access to Bun documentation.
+
+## How to use:
+- Browse the documentation tree starting from the root
+- Each .md file shows its first line content as description (usually the title or main topic)
+- Read any documentation file to get full content
+
+## APIs
+
+- \`Bun.serve()\` supports WebSockets, HTTPS, and routes. Don't use \`express\`.
+- \`bun:sqlite\` for SQLite. Don't use \`better-sqlite3\`.
+- \`Bun.redis\` for Redis. Don't use \`ioredis\`.
+- \`Bun.sql\` for Postgres. Don't use \`pg\` or \`postgres.js\`.
+- \`WebSocket\` is built-in. Don't use \`ws\`.
+- Prefer \`Bun.file\` over \`node:fs\`'s readFile/writeFile
+- Bun.$\`ls\` instead of execa.
+
+## Tips:
+- **ALWAYS** read the documents to find if bun have a better version before you start use any node API
+- Start with 'quickstart.md' for a quick introduction
+- Check 'api/' directory for specific Bun APIs
+- Look in 'guides/' for practical examples and tutorials`;
+}
+
+const instructions = generateInstructions();
 
 const server = new Server(
   {
@@ -136,16 +143,9 @@ const server = new Server(
     capabilities: {
       resources: {},
     },
+    instructions: instructions,
   }
 );
-
-// Initialize root resources
-let rootResources: DocResource[] = [];
-
-// Load resources on startup
-await getRootResources().then((resources) => {
-  rootResources = resources;
-});
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   return {
@@ -166,7 +166,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
     if (stat.isDirectory()) {
       // Handle directory
-      const contents = await getDirectoryContents(path);
+      const contents = await scanDirectory(path);
       return {
         contents: [
           {
@@ -243,6 +243,3 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(
-  `Bun Doc MCP Server started - ${rootResources.length} root items available`
-);
