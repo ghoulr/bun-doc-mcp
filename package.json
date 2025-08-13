@@ -20,6 +20,8 @@
     "@modelcontextprotocol/sdk": "^1.17.2"
   },
   "scripts": {
+    "build": "bun build index.ts --production --target=bun --outdir=dist",
+    "build:dev": "bun build index.ts --sourcemap=inline --target=bun --outdir=dist",
     "lint": "eslint *.ts",
     "lint:fix": "eslint *.ts --fix",
     "typecheck": "tsc --noEmit",
