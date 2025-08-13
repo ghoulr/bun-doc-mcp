@@ -102,6 +102,18 @@ function getMimeType(filePath: string): string {
   return file.type || 'application/x-unknown';
 }
 
+function normalizePath(path: string): string {
+  if (!path) return '';
+
+  // Remove leading and trailing slashes
+  path = path.replace(/^\/+|\/+$/g, '');
+
+  // Replace multiple slashes with single slash
+  path = path.replace(/\/+/g, '/');
+
+  return path;
+}
+
 async function getFileDescription(
   filePath: string,
   fileName: string
@@ -154,7 +166,9 @@ async function scanDirectory(
       // Skip hidden files
       if (name.startsWith('.')) continue;
 
-      const resourcePath = relativePath ? `${relativePath}/${name}` : name;
+      const resourcePath = normalizePath(
+        relativePath ? `${relativePath}/${name}` : name
+      );
 
       if (entry.isDirectory()) {
         resources.push({
@@ -217,7 +231,11 @@ async function grepDocuments(
     throw new Error(`Invalid regular expression: ${pattern}`);
   }
 
-  const fullPath = searchPath ? join(DOCS_DIR, searchPath) : DOCS_DIR;
+  // Normalize search path
+  const normalizedSearchPath = normalizePath(searchPath);
+  const fullPath = normalizedSearchPath
+    ? join(DOCS_DIR, normalizedSearchPath)
+    : DOCS_DIR;
 
   if (!existsSync(fullPath)) {
     return results;
@@ -231,9 +249,9 @@ async function grepDocuments(
         if (entry.name.startsWith('.')) continue;
 
         const entryPath = join(dirPath, entry.name);
-        const entryRelativePath = relativePath
-          ? `${relativePath}/${entry.name}`
-          : entry.name;
+        const entryRelativePath = normalizePath(
+          relativePath ? `${relativePath}/${entry.name}` : entry.name
+        );
 
         if (entry.isDirectory()) {
           await searchDirectory(entryPath, entryRelativePath);
@@ -254,12 +272,12 @@ async function grepDocuments(
 
   const stat = statSync(fullPath);
   if (stat.isDirectory()) {
-    await searchDirectory(fullPath, searchPath);
+    await searchDirectory(fullPath, normalizedSearchPath);
   } else if (stat.isFile() && isTextFile(fullPath)) {
     const matchCount = await countMatches(fullPath, regex);
     if (matchCount > 0) {
       results.push({
-        uri: `bun-doc://${searchPath}`,
+        uri: `bun-doc://${normalizedSearchPath}`,
         matchCount,
       });
     }

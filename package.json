@@ -1,6 +1,6 @@
 {
   "name": "bun-doc-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for Bun documentation",
   "module": "index.ts",
   "main": "dist/index.js",
@@ -35,7 +35,7 @@
     "@modelcontextprotocol/sdk": "^1.17.2"
   },
   "scripts": {
-    "build": "bun build index.ts --production --target=bun --outfile=dist/index.js && chmod +x dist/index.js",
+    "build": "bun build index.ts --production --target=bun --outfile=dist/index.js",
     "build:dev": "bun build index.ts --sourcemap=inline --target=bun --outfile=dist/index.js",
     "prepublishOnly": "bun run build",
     "lint": "eslint *.ts",
