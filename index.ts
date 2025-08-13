@@ -5,6 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { join } from 'node:path';
 import { readdirSync, statSync, existsSync } from 'node:fs';
@@ -16,6 +18,11 @@ interface DocResource {
   name: string;
   description: string;
   mimeType: string;
+}
+
+interface GrepResult {
+  uri: string;
+  matchCount: number;
 }
 
 function getMimeType(filePath: string): string {
@@ -103,17 +110,102 @@ async function scanDirectory(
   return resources;
 }
 
+function isTextFile(fileName: string): boolean {
+  const textExtensions = ['.md', '.txt', '.js', '.ts', '.tsx'];
+  return textExtensions.some((ext) => fileName.toLowerCase().endsWith(ext));
+}
+
+async function countMatches(
+  filePath: string,
+  pattern: RegExp
+): Promise<number> {
+  try {
+    const file = Bun.file(filePath);
+    if (file.size > 100 * 1024) return 0;
+
+    const content = await file.text();
+    const matches = content.match(pattern);
+    return matches ? matches.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function grepDocuments(
+  pattern: string,
+  searchPath: string = '',
+  limit: number = 30
+): Promise<GrepResult[]> {
+  const results: GrepResult[] = [];
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, 'g');
+  } catch {
+    throw new Error(`Invalid regular expression: ${pattern}`);
+  }
+
+  const fullPath = searchPath ? join(DOCS_DIR, searchPath) : DOCS_DIR;
+
+  if (!existsSync(fullPath)) {
+    return results;
+  }
+
+  async function searchDirectory(dirPath: string, relativePath: string = '') {
+    try {
+      const entries = readdirSync(dirPath, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+
+        const entryPath = join(dirPath, entry.name);
+        const entryRelativePath = relativePath
+          ? `${relativePath}/${entry.name}`
+          : entry.name;
+
+        if (entry.isDirectory()) {
+          await searchDirectory(entryPath, entryRelativePath);
+        } else if (entry.isFile() && isTextFile(entry.name)) {
+          const matchCount = await countMatches(entryPath, regex);
+          if (matchCount > 0) {
+            results.push({
+              uri: `bun-doc://${entryRelativePath}`,
+              matchCount,
+            });
+          }
+        }
+      }
+    } catch {
+      // Skip unreadable directories
+    }
+  }
+
+  const stat = statSync(fullPath);
+  if (stat.isDirectory()) {
+    await searchDirectory(fullPath, searchPath);
+  } else if (stat.isFile() && isTextFile(fullPath)) {
+    const matchCount = await countMatches(fullPath, regex);
+    if (matchCount > 0) {
+      results.push({
+        uri: `bun-doc://${searchPath}`,
+        matchCount,
+      });
+    }
+  }
+
+  return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, limit);
+}
+
 // Load resources first
 const rootResources = await scanDirectory();
 
-// Generate dynamic instructions based on available directories
-function generateInstructions(): string {
-  return `This MCP server provides access to Bun documentation.
+const INSTRUCTIONS = `This MCP server provides access to Bun documentation.
 
 ## How to use:
 - Browse the documentation tree starting from the root
 - Each .md file shows its first line content as description (usually the title or main topic)
 - Read any documentation file to get full content
+- Use the grep_docs tool to search through documentation content
 
 ## APIs
 
@@ -127,12 +219,17 @@ function generateInstructions(): string {
 
 ## Tips:
 - **ALWAYS** read the documents to find if bun have a better version before you start use any node API
-- Start with 'quickstart.md' for a quick introduction
+- Use grep_docs to quickly find relevant documentation before reading specific files
 - Check 'api/' directory for specific Bun APIs
 - Look in 'guides/' for practical examples and tutorials`;
-}
 
-const instructions = generateInstructions();
+const GREP_DOCS_DESCRIPTION = `Search through Bun documentation using JavaScript regular expressions.
+Returns: Array of objects with uri and matchCount, sorted by relevance.
+
+Examples:
+- Search for WebSocket: pattern: 'WebSocket'
+- Find SQLite APIs: pattern: 'sqlite', path: 'api/'
+- Complex patterns: pattern: 'Bun\\\\.(serve|file)'`;
 
 const server = new Server(
   {
@@ -142,14 +239,45 @@ const server = new Server(
   {
     capabilities: {
       resources: {},
+      tools: {},
     },
-    instructions: instructions,
+    instructions: INSTRUCTIONS,
   }
 );
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   return {
     resources: rootResources,
+  };
+});
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: 'grep_docs',
+        description: GREP_DOCS_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pattern: {
+              type: 'string',
+              description: 'JavaScript regex pattern to search for',
+            },
+            path: {
+              type: 'string',
+              description:
+                "Optional path to search in (e.g., 'api/' or 'guides/')",
+            },
+            limit: {
+              type: 'number',
+              description: 'Maximum number of results to return (default: 30)',
+            },
+          },
+          required: ['pattern'],
+        },
+      },
+    ],
   };
 });
 
@@ -238,6 +366,40 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         },
       ],
     };
+  }
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  if (name !== 'grep_docs') {
+    throw new Error(`Unknown tool: ${name}`);
+  }
+
+  const { pattern, path, limit } = args as {
+    pattern: string;
+    path?: string;
+    limit?: number;
+  };
+
+  if (!pattern) {
+    throw new Error('Pattern parameter is required');
+  }
+
+  try {
+    const results = await grepDocuments(pattern, path, limit);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(results, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    throw new Error(
+      `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
   }
 });
 
