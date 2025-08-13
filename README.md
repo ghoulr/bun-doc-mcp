@@ -34,12 +34,13 @@ claude mcp add bun-doc-mcp bunx -- bun-doc-mcp --github-only
     "bun-doc-mcp": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["bun-doc-mcp"], // or ["bun-doc-mcp", "--github-only"] if you want
+      "args": ["bun-doc-mcp"],
       "env": {}
     }
   }
 }
 ```
+Set `args: ["bun-doc-mcp", "--github-only"]` if you want.
 
 🎉 You're Ready! Happy coding with Bun! 🚀
 
