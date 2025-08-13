@@ -27,12 +27,9 @@ async function downloadDocsFromGitHub(
   try {
     mkdirSync(dirname(targetDir), { recursive: true });
 
-    await $`git init ${tempDir}`.quiet();
-    await $`cd ${tempDir} && git remote add origin ${repoUrl}`.quiet();
-    await $`cd ${tempDir} && git sparse-checkout init --cone`.quiet();
-    await $`cd ${tempDir} && git sparse-checkout set docs packages/bun-types`.quiet();
-    await $`cd ${tempDir} && git fetch --depth 1 origin ${gitTag}`.quiet();
-    await $`cd ${tempDir} && git checkout FETCH_HEAD`.quiet();
+    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
+    await $`git clone --filter=blob:none --sparse --depth 1 --branch ${gitTag} ${repoUrl} ${tempDir}`.quiet();
+    await $`cd ${tempDir} && git sparse-checkout set docs packages/bun-types/docs`.quiet();
 
     let sourceDir: string;
     if (existsSync(join(tempDir, 'docs'))) {
@@ -43,13 +40,15 @@ async function downloadDocsFromGitHub(
       throw new Error(`Documentation not found in tag ${gitTag}`);
     }
 
+    await $`rm -rf ${targetDir}`.quiet().catch(() => {});
     await $`mv ${sourceDir} ${targetDir}`.quiet();
-    await $`rm -rf ${tempDir}`.quiet();
   } catch (error) {
     await $`rm -rf ${tempDir}`.quiet().catch(() => {});
     throw new Error(
       `Failed to download docs: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
+  } finally {
+    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
   }
 }
 
