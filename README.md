@@ -21,10 +21,10 @@ For more reliable access and search capabilities, install this MCP server:
 **Claude Code:**
 ```bash
 # Standard installation (uses your local Bun docs)
-claude mcp add bun-doc-mcp bun -- dist/index.js
+claude mcp add bun-doc-mcp bunx -- bun-doc-mcp
 
 # GitHub-only mode (always fetch from upstream)
-claude mcp add bun-doc-mcp bun -- dist/index.js --github-only
+claude mcp add bun-doc-mcp bunx -- bun-doc-mcp --github-only
 ```
 
 **Manual configuration:**
@@ -33,8 +33,8 @@ claude mcp add bun-doc-mcp bun -- dist/index.js --github-only
   "mcpServers": {
     "bun-doc-mcp": {
       "type": "stdio",
-      "command": "bun",
-      "args": ["dist/index.js"],
+      "command": "bunx",
+      "args": ["bun-doc-mcp"], // or ["bun-doc-mcp", "--github-only"] if you want
       "env": {}
     }
   }

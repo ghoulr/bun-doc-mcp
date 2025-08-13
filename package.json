@@ -1,8 +1,23 @@
 {
   "name": "bun-doc-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Bun documentation",
   "module": "index.ts",
+  "main": "dist/index.js",
   "type": "module",
-  "private": true,
+  "bin": {
+    "bun-doc-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "keywords": ["mcp", "bun", "documentation", "model-context-protocol"],
+  "author": "Zhou Rui",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ghoulr/bun-doc-mcp"
+  },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
     "@types/bun": "latest",
@@ -20,8 +35,9 @@
     "@modelcontextprotocol/sdk": "^1.17.2"
   },
   "scripts": {
-    "build": "bun build index.ts --production --target=bun --outdir=dist",
-    "build:dev": "bun build index.ts --sourcemap=inline --target=bun --outdir=dist",
+    "build": "bun build index.ts --production --target=bun --outfile=dist/index.js && chmod +x dist/index.js",
+    "build:dev": "bun build index.ts --sourcemap=inline --target=bun --outfile=dist/index.js",
+    "prepublishOnly": "bun run build",
     "lint": "eslint *.ts",
     "lint:fix": "eslint *.ts --fix",
     "typecheck": "tsc --noEmit",
