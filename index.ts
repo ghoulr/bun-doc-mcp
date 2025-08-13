@@ -8,10 +8,82 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { join } from 'node:path';
-import { readdirSync, statSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
+import { $ } from 'bun';
+import { homedir } from 'node:os';
 
-const DOCS_DIR = join(process.cwd(), 'node_modules', 'bun-types', 'docs');
+const args = process.argv.slice(2);
+const githubOnly = args.includes('--github-only');
+
+async function downloadDocsFromGitHub(
+  version: string,
+  targetDir: string
+): Promise<void> {
+  const gitTag = `bun-v${version}`;
+  const repoUrl = 'https://github.com/oven-sh/bun.git';
+  const tempDir = join(dirname(targetDir), '.tmp-git');
+
+  try {
+    mkdirSync(dirname(targetDir), { recursive: true });
+
+    await $`git init ${tempDir}`.quiet();
+    await $`cd ${tempDir} && git remote add origin ${repoUrl}`.quiet();
+    await $`cd ${tempDir} && git sparse-checkout init --cone`.quiet();
+    await $`cd ${tempDir} && git sparse-checkout set docs packages/bun-types`.quiet();
+    await $`cd ${tempDir} && git fetch --depth 1 origin ${gitTag}`.quiet();
+    await $`cd ${tempDir} && git checkout FETCH_HEAD`.quiet();
+
+    let sourceDir: string;
+    if (existsSync(join(tempDir, 'docs'))) {
+      sourceDir = join(tempDir, 'docs');
+    } else if (existsSync(join(tempDir, 'packages', 'bun-types', 'docs'))) {
+      sourceDir = join(tempDir, 'packages', 'bun-types', 'docs');
+    } else {
+      throw new Error(`Documentation not found in tag ${gitTag}`);
+    }
+
+    await $`mv ${sourceDir} ${targetDir}`.quiet();
+    await $`rm -rf ${tempDir}`.quiet();
+  } catch (error) {
+    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
+    throw new Error(
+      `Failed to download docs: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+async function initializeDocsDir(): Promise<string> {
+  const bunVersion = Bun.version;
+  const localDocsDir = join(process.cwd(), 'node_modules', 'bun-types', 'docs');
+  const cacheDocsDir = join(
+    homedir(),
+    '.cache',
+    'bun-doc-mcp',
+    bunVersion,
+    'bun-types',
+    'docs'
+  );
+
+  if (githubOnly) {
+    if (!existsSync(cacheDocsDir)) {
+      await downloadDocsFromGitHub(bunVersion, cacheDocsDir);
+    }
+    return cacheDocsDir;
+  }
+
+  if (existsSync(localDocsDir)) {
+    return localDocsDir;
+  }
+
+  if (!existsSync(cacheDocsDir)) {
+    await downloadDocsFromGitHub(bunVersion, cacheDocsDir);
+  }
+
+  return cacheDocsDir;
+}
+
+const DOCS_DIR = await initializeDocsDir();
 
 interface DocResource {
   uri: string;
@@ -196,7 +268,7 @@ async function grepDocuments(
   return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, limit);
 }
 
-// Load resources first
+// Load resources after DOCS_DIR is initialized
 const rootResources = await scanDirectory();
 
 const INSTRUCTIONS = `This MCP server provides access to Bun documentation.

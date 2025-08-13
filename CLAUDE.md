@@ -8,6 +8,10 @@ This MCP server acts as a file system proxy for the Bun documentation located in
 
 ## Technical Decisions
 
+### Project Structure
+- Single `index.ts` implementation
+- Minimal dependencies, only depened on `@modelcontextprotocol/sdk`
+
 ### URI Format
 - Files keep their extensions: `bun-doc://quickstart.md`
 - Directories have no special markers: `bun-doc://api`
