@@ -1,20 +1,46 @@
 #!/usr/bin/env bun
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+  McpServer,
+  ResourceTemplate,
+} from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
 import { join, dirname } from 'node:path';
 import { readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
 import { $ } from 'bun';
 import { homedir } from 'node:os';
 
+// Import version as a compile-time macro - executed at bundle-time, zero runtime overhead
+import { getPackageVersion } from './macros.ts' with { type: 'macro' };
+const VERSION = await getPackageVersion();
+
+// Constants
+const MAX_FILE_SIZE = 100 * 1024; // 100KB
+const PREVIEW_SIZE = 500; // bytes
+const DEFAULT_SEARCH_LIMIT = 30;
+const TEXT_EXTENSIONS = new Set(['.md', '.txt', '.js', '.ts', '.tsx']);
+
+// Type definitions
+type Resource = {
+  uri: string;
+  name: string;
+  description: string;
+  mimeType: string;
+};
+
+type SearchResult = {
+  uri: string;
+  matchCount: number;
+};
+
 const args = process.argv.slice(2);
 const githubOnly = args.includes('--github-only');
+
+if (args.includes('--version') || args.includes('-v')) {
+  console.log(VERSION);
+  process.exit(0);
+}
 
 async function downloadDocsFromGitHub(
   version: string,
@@ -24,31 +50,34 @@ async function downloadDocsFromGitHub(
   const repoUrl = 'https://github.com/oven-sh/bun.git';
   const tempDir = join(dirname(targetDir), '.tmp-git');
 
+  const cleanupTemp = async () => {
+    try {
+      await $`rm -rf ${tempDir}`.quiet();
+    } catch {
+      // Ignore cleanup errors
+    }
+  };
+
   try {
     mkdirSync(dirname(targetDir), { recursive: true });
 
-    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
+    await cleanupTemp();
     await $`git clone --filter=blob:none --sparse --depth 1 --branch ${gitTag} ${repoUrl} ${tempDir}`.quiet();
-    await $`cd ${tempDir} && git sparse-checkout set docs packages/bun-types/docs`.quiet();
+    await $`cd ${tempDir} && git sparse-checkout set packages/bun-types/docs`.quiet();
 
-    let sourceDir: string;
-    if (existsSync(join(tempDir, 'docs'))) {
-      sourceDir = join(tempDir, 'docs');
-    } else if (existsSync(join(tempDir, 'packages', 'bun-types', 'docs'))) {
-      sourceDir = join(tempDir, 'packages', 'bun-types', 'docs');
-    } else {
+    const sourceDir = join(tempDir, 'packages', 'bun-types', 'docs');
+    if (!existsSync(sourceDir)) {
       throw new Error(`Documentation not found in tag ${gitTag}`);
     }
 
     await $`rm -rf ${targetDir}`.quiet().catch(() => {});
     await $`mv ${sourceDir} ${targetDir}`.quiet();
   } catch (error) {
-    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
     throw new Error(
       `Failed to download docs: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
   } finally {
-    await $`rm -rf ${tempDir}`.quiet().catch(() => {});
+    await cleanupTemp();
   }
 }
 
@@ -84,77 +113,55 @@ async function initializeDocsDir(): Promise<string> {
 
 const DOCS_DIR = await initializeDocsDir();
 
-interface DocResource {
-  uri: string;
-  name: string;
-  description: string;
-  mimeType: string;
-}
-
-interface GrepResult {
-  uri: string;
-  matchCount: number;
-}
-
-function getMimeType(filePath: string): string {
-  const file = Bun.file(filePath);
-  return file.type || 'application/x-unknown';
-}
-
+// Helper functions
 function normalizePath(path: string): string {
   if (!path) return '';
+  return path.replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/');
+}
 
-  // Remove leading and trailing slashes
-  path = path.replace(/^\/+|\/+$/g, '');
+function getFullPath(relativePath: string): string {
+  return relativePath ? join(DOCS_DIR, relativePath) : DOCS_DIR;
+}
 
-  // Replace multiple slashes with single slash
-  path = path.replace(/\/+/g, '/');
-
-  return path;
+function isTextFile(fileName: string): boolean {
+  const lastDot = fileName.lastIndexOf('.');
+  if (lastDot === -1) return false;
+  const ext = fileName.substring(lastDot).toLowerCase();
+  return TEXT_EXTENSIONS.has(ext);
 }
 
 async function getFileDescription(
   filePath: string,
   fileName: string
 ): Promise<string> {
-  // For .md files, try to get first line as description
-  if (fileName.endsWith('.md')) {
-    try {
-      const file = Bun.file(filePath);
-      // Use slice to read only first 500 bytes
-      const partial = file.slice(0, 500);
-      const text = await partial.text();
+  const defaultDescription = `File: ${fileName}`;
 
-      const lines = text.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed) {
-          // Remove markdown headers if present
-          return trimmed.replace(/^#+\s*/, '');
-        }
-      }
-      return `File: ${fileName}`;
-    } catch {
-      return `File: ${fileName}`;
-    }
+  if (!fileName.endsWith('.md')) {
+    return defaultDescription;
   }
 
-  // For other files, use the current format
-  return `File: ${fileName}`;
+  try {
+    const file = Bun.file(filePath);
+    const partial = file.slice(0, PREVIEW_SIZE);
+    const text = await partial.text();
+
+    const firstLine = text.split('\n').find((line) => line.trim());
+    return firstLine
+      ? firstLine.trim().replace(/^#+\s*/, '')
+      : defaultDescription;
+  } catch {
+    return defaultDescription;
+  }
 }
 
 async function scanDirectory(
   relativePath: string = ''
-): Promise<DocResource[]> {
-  const resources: DocResource[] = [];
-  const fullPath = relativePath ? join(DOCS_DIR, relativePath) : DOCS_DIR;
+): Promise<{ resources: Resource[] }> {
+  const resources: Resource[] = [];
+  const fullPath = getFullPath(relativePath);
 
-  // Check if directory exists
   if (!existsSync(fullPath)) {
-    if (!relativePath) {
-      console.error(`Docs directory not found: ${fullPath}`);
-    }
-    return resources;
+    return { resources };
   }
 
   try {
@@ -162,7 +169,6 @@ async function scanDirectory(
 
     for (const entry of entries) {
       const name = entry.name;
-      // Skip hidden files
       if (name.startsWith('.')) continue;
 
       const resourcePath = normalizePath(
@@ -171,7 +177,7 @@ async function scanDirectory(
 
       if (entry.isDirectory()) {
         resources.push({
-          uri: `bun-doc://${resourcePath}`,
+          uri: `buncument://${resourcePath}`,
           name: name,
           description: '',
           mimeType: 'text/directory',
@@ -179,25 +185,18 @@ async function scanDirectory(
       } else if (entry.isFile()) {
         const filePath = join(fullPath, name);
         resources.push({
-          uri: `bun-doc://${resourcePath}`,
+          uri: `buncument://${resourcePath}`,
           name: name,
           description: await getFileDescription(filePath, name),
-          mimeType: getMimeType(filePath),
+          mimeType: Bun.file(filePath).type || 'application/x-unknown',
         });
       }
     }
-  } catch (error) {
-    if (!relativePath) {
-      console.error('Error reading docs directory:', error);
-    }
+  } catch {
+    // Skip errors for now
   }
 
-  return resources;
-}
-
-function isTextFile(fileName: string): boolean {
-  const textExtensions = ['.md', '.txt', '.js', '.ts', '.tsx'];
-  return textExtensions.some((ext) => fileName.toLowerCase().endsWith(ext));
+  return { resources };
 }
 
 async function countMatches(
@@ -206,7 +205,7 @@ async function countMatches(
 ): Promise<number> {
   try {
     const file = Bun.file(filePath);
-    if (file.size > 100 * 1024) return 0;
+    if (file.size > MAX_FILE_SIZE) return 0;
 
     const content = await file.text();
     const matches = content.match(pattern);
@@ -219,9 +218,9 @@ async function countMatches(
 async function grepDocuments(
   pattern: string,
   searchPath: string = '',
-  limit: number = 30
-): Promise<GrepResult[]> {
-  const results: GrepResult[] = [];
+  limit: number = DEFAULT_SEARCH_LIMIT
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
 
   let regex: RegExp;
   try {
@@ -230,14 +229,21 @@ async function grepDocuments(
     throw new Error(`Invalid regular expression: ${pattern}`);
   }
 
-  // Normalize search path
   const normalizedSearchPath = normalizePath(searchPath);
-  const fullPath = normalizedSearchPath
-    ? join(DOCS_DIR, normalizedSearchPath)
-    : DOCS_DIR;
+  const fullPath = getFullPath(normalizedSearchPath);
 
   if (!existsSync(fullPath)) {
     return results;
+  }
+
+  async function processFile(filePath: string, relativePath: string) {
+    const matchCount = await countMatches(filePath, regex);
+    if (matchCount > 0) {
+      results.push({
+        uri: `buncument://${relativePath}`,
+        matchCount,
+      });
+    }
   }
 
   async function searchDirectory(dirPath: string, relativePath: string = '') {
@@ -248,20 +254,14 @@ async function grepDocuments(
         if (entry.name.startsWith('.')) continue;
 
         const entryPath = join(dirPath, entry.name);
-        const entryRelativePath = normalizePath(
-          relativePath ? `${relativePath}/${entry.name}` : entry.name
-        );
+        const entryRelativePath = relativePath
+          ? normalizePath(`${relativePath}/${entry.name}`)
+          : entry.name;
 
         if (entry.isDirectory()) {
           await searchDirectory(entryPath, entryRelativePath);
         } else if (entry.isFile() && isTextFile(entry.name)) {
-          const matchCount = await countMatches(entryPath, regex);
-          if (matchCount > 0) {
-            results.push({
-              uri: `bun-doc://${entryRelativePath}`,
-              matchCount,
-            });
-          }
+          await processFile(entryPath, entryRelativePath);
         }
       }
     } catch {
@@ -272,23 +272,34 @@ async function grepDocuments(
   const stat = statSync(fullPath);
   if (stat.isDirectory()) {
     await searchDirectory(fullPath, normalizedSearchPath);
-  } else if (stat.isFile() && isTextFile(fullPath)) {
-    const matchCount = await countMatches(fullPath, regex);
-    if (matchCount > 0) {
-      results.push({
-        uri: `bun-doc://${normalizedSearchPath}`,
-        matchCount,
-      });
-    }
+  } else if (
+    stat.isFile() &&
+    isTextFile(normalizedSearchPath.split('/').pop() || '')
+  ) {
+    await processFile(fullPath, normalizedSearchPath);
   }
 
   return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, limit);
 }
 
-// Load resources after DOCS_DIR is initialized
-const rootResources = await scanDirectory();
+// Initialize root directories after scanDirectory is defined
+const rootScan = await scanDirectory();
+const ROOT_DIRECTORIES = rootScan.resources
+  .filter((resource) => resource.mimeType === 'text/directory')
+  .map((resource) => resource.name)
+  .sort();
 
-const INSTRUCTIONS = `This MCP server provides access to Bun documentation.
+const server = new McpServer(
+  {
+    name: 'bun-doc-mcp',
+    version: VERSION,
+  },
+  {
+    capabilities: {
+      resources: {},
+      tools: {},
+    },
+    instructions: `This MCP server provides access to Bun documentation.
 
 ## How to use:
 - Browse the documentation tree starting from the root
@@ -297,7 +308,6 @@ const INSTRUCTIONS = `This MCP server provides access to Bun documentation.
 - Use the grep_docs tool to search through documentation content
 
 ## APIs
-
 - \`Bun.serve()\` supports WebSockets, HTTPS, and routes. Don't use \`express\`.
 - \`bun:sqlite\` for SQLite. Don't use \`better-sqlite3\`.
 - \`Bun.redis\` for Redis. Don't use \`ioredis\`.
@@ -310,89 +320,45 @@ const INSTRUCTIONS = `This MCP server provides access to Bun documentation.
 - **ALWAYS** read the documents to find if bun have a better version before you start use any node API
 - Use grep_docs to quickly find relevant documentation before reading specific files
 - Check 'api/' directory for specific Bun APIs
-- Look in 'guides/' for practical examples and tutorials`;
+- Look in 'guides/' for practical examples and tutorials
 
-const GREP_DOCS_DESCRIPTION = `Search through Bun documentation using JavaScript regular expressions.
-Returns: Array of objects with uri and matchCount, sorted by relevance.
-
-Examples:
-- Search for WebSocket: pattern: 'WebSocket'
-- Find SQLite APIs: pattern: 'sqlite', path: 'api/'
-- Complex patterns: pattern: 'Bun\\\\.(serve|file)'`;
-
-const server = new Server(
-  {
-    name: 'bun-doc-mcp',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      resources: {},
-      tools: {},
-    },
-    instructions: INSTRUCTIONS,
+## Search Strategy:
+- If grep_docs doesn't find what you need, browse the resources
+- Start from root to understand the documentation organization
+- Key directories: 'api/' (APIs), 'bundler/' (build tools, macros), 'guides/' (examples), 'runtime/' (runtime features)`,
   }
 );
 
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  return {
-    resources: rootResources,
-  };
-});
+async function handleResourceRequest(
+  uri: URL,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  variables: Record<string, string | string[]>
+) {
+  // Extract path from URI: hostname + pathname
+  // e.g., buncument://api/websockets.md -> api/websockets.md
+  let path = uri.hostname + uri.pathname;
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: 'grep_docs',
-        description: GREP_DOCS_DESCRIPTION,
-        inputSchema: {
-          type: 'object',
-          properties: {
-            pattern: {
-              type: 'string',
-              description: 'JavaScript regex pattern to search for',
-            },
-            path: {
-              type: 'string',
-              description:
-                "Optional path to search in (e.g., 'api/' or 'guides/')",
-            },
-            limit: {
-              type: 'number',
-              description: 'Maximum number of results to return (default: 30)',
-            },
-          },
-          required: ['pattern'],
-        },
-      },
-    ],
-  };
-});
+  // Remove leading slash from pathname if present
+  if (path.startsWith('/')) {
+    path = path.slice(1);
+  }
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const { uri } = request.params;
+  const fullPath = getFullPath(path);
 
-  // Remove protocol prefix
-  const path = uri.replace('bun-doc://', '');
-  const fullPath = join(DOCS_DIR, path);
-
-  // Check if path exists and what type it is
   try {
     const stat = statSync(fullPath);
 
     if (stat.isDirectory()) {
-      // Handle directory
       const contents = await scanDirectory(path);
       return {
         contents: [
           {
-            uri,
+            uri: uri.toString(),
             mimeType: 'text/directory',
             text: JSON.stringify(
               {
                 path: path,
-                entries: contents,
+                entries: contents.resources,
               },
               null,
               2
@@ -401,15 +367,13 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         ],
       };
     } else {
-      // Handle file
       const file = Bun.file(fullPath);
 
-      // Check file size (100KB limit for docs)
-      if (file.size > 100 * 1024) {
+      if (file.size > MAX_FILE_SIZE) {
         return {
           contents: [
             {
-              uri,
+              uri: uri.toString(),
               mimeType: 'text/plain',
               text: `[File too large: ${(file.size / 1024).toFixed(2)}KB]`,
             },
@@ -417,80 +381,89 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         };
       }
 
-      const mimeType = file.type || 'application/x-unknown';
-
-      // Try to read as text
-      try {
-        const content = await file.text();
-        return {
-          contents: [
-            {
-              uri,
-              mimeType: mimeType,
-              text: content,
-            },
-          ],
-        };
-      } catch (error) {
-        // Cannot read as text
-        return {
-          contents: [
-            {
-              uri,
-              mimeType: 'text/plain',
-              text: `[Cannot read file: ${error instanceof Error ? error.message : 'Unknown error'}]`,
-            },
-          ],
-        };
-      }
+      const content = await file.text();
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: file.type || 'application/x-unknown',
+            text: content,
+          },
+        ],
+      };
     }
   } catch (error) {
-    // Path doesn't exist or other IO error
     return {
       contents: [
         {
-          uri,
+          uri: uri.toString(),
           mimeType: 'text/plain',
           text: `[Resource error: ${error instanceof Error ? error.message : 'Resource not found'}]`,
         },
       ],
     };
   }
+}
+
+const resourceTemplate = new ResourceTemplate('buncument://{+path}', {
+  list: async () => {
+    // List callback doesn't receive variables, only return root directory
+    return await scanDirectory();
+  },
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+server.registerResource(
+  'bun-docs',
+  resourceTemplate,
+  {
+    description: `Bun documentation directories: ${ROOT_DIRECTORIES.join(', ')}`,
+    mimeType: 'text/directory',
+  },
+  handleResourceRequest
+);
 
-  if (name !== 'grep_docs') {
-    throw new Error(`Unknown tool: ${name}`);
+server.registerTool(
+  'grep_bun_docs',
+  {
+    description: `Search through Bun documentation using JavaScript regular expressions.
+Returns: Array of objects with uri and matchCount, sorted by relevance.
+
+Examples:
+- Search for WebSocket: pattern: 'WebSocket'
+- Find SQLite APIs: pattern: 'sqlite', path: 'api/'
+- Complex patterns: pattern: 'Bun\\\\.(serve|file)'`,
+    inputSchema: {
+      pattern: z.string().describe('JavaScript regex pattern to search for'),
+      path: z
+        .string()
+        .optional()
+        .describe("Optional path to search in (e.g., 'api/' or 'guides/')"),
+      limit: z
+        .number()
+        .optional()
+        .describe(
+          `Maximum number of results to return (default: ${DEFAULT_SEARCH_LIMIT})`
+        ),
+    },
+  },
+  async ({ pattern, path, limit = DEFAULT_SEARCH_LIMIT }) => {
+    try {
+      const results = await grepDocuments(pattern, path, limit);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(results, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new Error(
+        `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
-
-  const { pattern, path, limit } = args as {
-    pattern: string;
-    path?: string;
-    limit?: number;
-  };
-
-  if (!pattern) {
-    throw new Error('Pattern parameter is required');
-  }
-
-  try {
-    const results = await grepDocuments(pattern, path, limit);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(results, null, 2),
-        },
-      ],
-    };
-  } catch (error) {
-    throw new Error(
-      `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-  }
-});
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

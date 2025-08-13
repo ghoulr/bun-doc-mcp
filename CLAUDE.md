@@ -13,8 +13,9 @@ This MCP server acts as a file system proxy for the Bun documentation located in
 - Minimal dependencies, only depened on `@modelcontextprotocol/sdk`
 
 ### URI Format
-- Files keep their extensions: `bun-doc://quickstart.md`
-- Directories have no special markers: `bun-doc://api`
+- Uses creative scheme name: `buncument://` (bun + document)
+- Files keep their extensions: `buncument://quickstart.md`
+- Directories have no special markers: `buncument://api`
 - Follows standard file system conventions
 
 ### MIME Types
@@ -27,6 +28,18 @@ This MCP server acts as a file system proxy for the Bun documentation located in
 - Keep responses concise - this is a CLI tool
 - No unnecessary comments in code
 - Follow existing patterns in the codebase
+
+## Testing Guidelines
+
+### MCP Server Testing
+After making code changes that affect MCP functionality:
+
+1. **User must restart MCP server** - ask user to restart
+2. **Wait for restart confirmation** - Don't proceed until user confirms restart
+3. **Test core functionality** using MCP tools:
+   - Test search
+   - Test resource reading
+   - Test directory browsing
 
 ## Important Notes
 
