@@ -7,7 +7,7 @@ import {
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { join, dirname } from 'node:path';
-import { readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { $ } from 'bun';
 import { homedir } from 'node:os';
 
@@ -16,10 +16,7 @@ import { getPackageVersion } from './macros.ts' with { type: 'macro' };
 const VERSION = await getPackageVersion();
 
 // Constants
-const MAX_FILE_SIZE = 100 * 1024; // 100KB
-const PREVIEW_SIZE = 500; // bytes
 const DEFAULT_SEARCH_LIMIT = 30;
-const TEXT_EXTENSIONS = new Set(['.md', '.txt', '.js', '.ts', '.tsx']);
 
 // Type definitions
 type Resource = {
@@ -34,10 +31,36 @@ type SearchResult = {
   matchCount: number;
 };
 
-const args = process.argv.slice(2);
-const githubOnly = args.includes('--github-only');
+// Nav.ts type definitions
+type NavPage = {
+  type: 'page';
+  slug: string;
+  title: string;
+  disabled?: boolean;
+  href?: string;
+  description?: string;
+};
 
-if (args.includes('--version') || args.includes('-v')) {
+type NavDivider = {
+  type: 'divider';
+  title: string;
+};
+
+type NavItem = NavPage | NavDivider;
+
+type Nav = {
+  items: NavItem[];
+};
+
+type PageInfo = {
+  title: string;
+  description: string;
+  divider: string;
+  disabled?: boolean;
+  href?: string;
+};
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log(VERSION);
   process.exit(0);
 }
@@ -63,9 +86,9 @@ async function downloadDocsFromGitHub(
 
     await cleanupTemp();
     await $`git clone --filter=blob:none --sparse --depth 1 --branch ${gitTag} ${repoUrl} ${tempDir}`.quiet();
-    await $`cd ${tempDir} && git sparse-checkout set packages/bun-types/docs`.quiet();
+    await $`cd ${tempDir} && git sparse-checkout set docs`.quiet();
 
-    const sourceDir = join(tempDir, 'packages', 'bun-types', 'docs');
+    const sourceDir = join(tempDir, 'docs');
     if (!existsSync(sourceDir)) {
       throw new Error(`Documentation not found in tag ${gitTag}`);
     }
@@ -83,29 +106,36 @@ async function downloadDocsFromGitHub(
 
 async function initializeDocsDir(): Promise<string> {
   const bunVersion = Bun.version;
-  const localDocsDir = join(process.cwd(), 'node_modules', 'bun-types', 'docs');
   const cacheDocsDir = join(
     homedir(),
     '.cache',
     'bun-doc-mcp',
     bunVersion,
-    'bun-types',
     'docs'
   );
 
-  if (githubOnly) {
-    if (!existsSync(cacheDocsDir)) {
-      await downloadDocsFromGitHub(bunVersion, cacheDocsDir);
-    }
-    return cacheDocsDir;
-  }
-
-  if (existsSync(localDocsDir)) {
-    return localDocsDir;
-  }
-
+  // First check: if directory doesn't exist, download
   if (!existsSync(cacheDocsDir)) {
     await downloadDocsFromGitHub(bunVersion, cacheDocsDir);
+  }
+
+  // Second check: if nav.ts doesn't exist, delete and re-download
+  const navPath = join(cacheDocsDir, 'nav.ts');
+  if (!existsSync(navPath)) {
+    console.error('nav.ts not found, re-downloading docs...');
+    await $`rm -rf ${cacheDocsDir}`.quiet().catch(() => {});
+    await downloadDocsFromGitHub(bunVersion, cacheDocsDir);
+
+    // Final check: if nav.ts still doesn't exist, exit with error
+    if (!existsSync(navPath)) {
+      console.error(
+        `Error: nav.ts not found in Bun ${bunVersion} documentation.`
+      );
+      console.error(
+        'This may indicate an incompatible Bun version or repository structure change.'
+      );
+      process.exit(1);
+    }
   }
 
   return cacheDocsDir;
@@ -113,87 +143,60 @@ async function initializeDocsDir(): Promise<string> {
 
 const DOCS_DIR = await initializeDocsDir();
 
-// Helper functions
-function normalizePath(path: string): string {
-  if (!path) return '';
-  return path.replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/');
-}
-
-function getFullPath(relativePath: string): string {
-  return relativePath ? join(DOCS_DIR, relativePath) : DOCS_DIR;
-}
-
-function isTextFile(fileName: string): boolean {
-  const lastDot = fileName.lastIndexOf('.');
-  if (lastDot === -1) return false;
-  const ext = fileName.substring(lastDot).toLowerCase();
-  return TEXT_EXTENSIONS.has(ext);
-}
-
-async function getFileDescription(
-  filePath: string,
-  fileName: string
-): Promise<string> {
-  const defaultDescription = `File: ${fileName}`;
-
-  if (!fileName.endsWith('.md')) {
-    return defaultDescription;
-  }
+// Parse nav.ts to build page mapping
+async function parseNavigation(): Promise<Map<string, PageInfo>> {
+  const navPath = join(DOCS_DIR, 'nav.ts');
+  const pageMap = new Map<string, PageInfo>();
 
   try {
-    const file = Bun.file(filePath);
-    const partial = file.slice(0, PREVIEW_SIZE);
-    const text = await partial.text();
+    // Import the nav.ts file dynamically
+    const navModule = await import(navPath);
+    const nav: Nav = navModule.default;
 
-    const firstLine = text.split('\n').find((line) => line.trim());
-    return firstLine
-      ? firstLine.trim().replace(/^#+\s*/, '')
-      : defaultDescription;
-  } catch {
-    return defaultDescription;
-  }
-}
+    let currentDivider = '';
 
-async function scanDirectory(
-  relativePath: string = ''
-): Promise<{ resources: Resource[] }> {
-  const resources: Resource[] = [];
-  const fullPath = getFullPath(relativePath);
-
-  if (!existsSync(fullPath)) {
-    return { resources };
-  }
-
-  try {
-    const entries = readdirSync(fullPath, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const name = entry.name;
-      if (name.startsWith('.')) continue;
-
-      const resourcePath = normalizePath(
-        relativePath ? `${relativePath}/${name}` : name
-      );
-
-      if (entry.isDirectory()) {
-        resources.push({
-          uri: `buncument://${resourcePath}`,
-          name: name,
-          description: '',
-          mimeType: 'text/directory',
-        });
-      } else if (entry.isFile()) {
-        const filePath = join(fullPath, name);
-        resources.push({
-          uri: `buncument://${resourcePath}`,
-          name: name,
-          description: await getFileDescription(filePath, name),
-          mimeType: Bun.file(filePath).type || 'application/x-unknown',
+    for (const item of nav.items) {
+      if (item.type === 'divider') {
+        currentDivider = item.title;
+      } else if (item.type === 'page') {
+        pageMap.set(item.slug, {
+          title: item.title,
+          description: item.description || '',
+          divider: currentDivider,
+          disabled: item.disabled,
+          href: item.href,
         });
       }
     }
-  } catch {
-    // Skip errors for now
+  } catch (error) {
+    console.error('Failed to parse nav.ts:', error);
+  }
+
+  return pageMap;
+}
+
+const PAGE_MAP = await parseNavigation();
+
+// Helper functions
+
+async function getAllPagesResources(): Promise<{ resources: Resource[] }> {
+  const resources: Resource[] = [];
+
+  for (const [slug, pageInfo] of PAGE_MAP) {
+    // Skip disabled pages
+    if (pageInfo.disabled) continue;
+
+    const description =
+      pageInfo.divider && pageInfo.description
+        ? `${pageInfo.divider} / ${pageInfo.description}`
+        : pageInfo.description || pageInfo.divider || '';
+
+    resources.push({
+      uri: `buncument://${slug}`,
+      name: pageInfo.title,
+      description: description,
+      mimeType: 'text/markdown',
+    });
   }
 
   return { resources };
@@ -205,8 +208,6 @@ async function countMatches(
 ): Promise<number> {
   try {
     const file = Bun.file(filePath);
-    if (file.size > MAX_FILE_SIZE) return 0;
-
     const content = await file.text();
     const matches = content.match(pattern);
     return matches ? matches.length : 0;
@@ -229,65 +230,40 @@ async function grepDocuments(
     throw new Error(`Invalid regular expression: ${pattern}`);
   }
 
-  const normalizedSearchPath = normalizePath(searchPath);
-  const fullPath = getFullPath(normalizedSearchPath);
+  // Get all slugs from nav.ts
+  const slugsToSearch = Array.from(PAGE_MAP.keys());
 
-  if (!existsSync(fullPath)) {
-    return results;
-  }
+  // Filter by searchPath if provided
+  const filteredSlugs = searchPath
+    ? slugsToSearch.filter((slug) => slug.startsWith(searchPath))
+    : slugsToSearch;
 
-  async function processFile(filePath: string, relativePath: string) {
+  // Search only in files mentioned in nav.ts
+  for (const slug of filteredSlugs) {
+    const pageInfo = PAGE_MAP.get(slug);
+    if (!pageInfo || pageInfo.disabled || pageInfo.href) {
+      continue; // Skip disabled pages and external links
+    }
+
+    const filePath = join(DOCS_DIR, `${slug}.md`);
+    if (!existsSync(filePath)) {
+      continue; // Skip if file doesn't exist
+    }
+
     const matchCount = await countMatches(filePath, regex);
     if (matchCount > 0) {
       results.push({
-        uri: `buncument://${relativePath}`,
+        uri: `buncument://${slug}`,
         matchCount,
       });
     }
   }
 
-  async function searchDirectory(dirPath: string, relativePath: string = '') {
-    try {
-      const entries = readdirSync(dirPath, { withFileTypes: true });
-
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-
-        const entryPath = join(dirPath, entry.name);
-        const entryRelativePath = relativePath
-          ? normalizePath(`${relativePath}/${entry.name}`)
-          : entry.name;
-
-        if (entry.isDirectory()) {
-          await searchDirectory(entryPath, entryRelativePath);
-        } else if (entry.isFile() && isTextFile(entry.name)) {
-          await processFile(entryPath, entryRelativePath);
-        }
-      }
-    } catch {
-      // Skip unreadable directories
-    }
-  }
-
-  const stat = statSync(fullPath);
-  if (stat.isDirectory()) {
-    await searchDirectory(fullPath, normalizedSearchPath);
-  } else if (
-    stat.isFile() &&
-    isTextFile(normalizedSearchPath.split('/').pop() || '')
-  ) {
-    await processFile(fullPath, normalizedSearchPath);
-  }
-
   return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, limit);
 }
 
-// Initialize root directories after scanDirectory is defined
-const rootScan = await scanDirectory();
-const ROOT_DIRECTORIES = rootScan.resources
-  .filter((resource) => resource.mimeType === 'text/directory')
-  .map((resource) => resource.name)
-  .sort();
+// Get page count for description
+const PAGE_COUNT = PAGE_MAP.size;
 
 const server = new McpServer(
   {
@@ -343,62 +319,102 @@ async function handleResourceRequest(
     path = path.slice(1);
   }
 
-  const fullPath = getFullPath(path);
+  // Handle root path - return all pages
+  if (!path || path === '') {
+    const contents = await getAllPagesResources();
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'application/json',
+          text: JSON.stringify(
+            {
+              path: '',
+              entries: contents.resources,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  // Handle specific page paths
+  const pageInfo = PAGE_MAP.get(path);
+  if (!pageInfo) {
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/plain',
+          text: `[Page not found: ${path}]`,
+        },
+      ],
+    };
+  }
+
+  // Check if page is disabled
+  if (pageInfo.disabled) {
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/plain',
+          text: `[Page disabled: ${pageInfo.title}]`,
+        },
+      ],
+    };
+  }
+
+  // Check if page has external href
+  if (pageInfo.href) {
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/plain',
+          text: `[External link: ${pageInfo.href}]`,
+        },
+      ],
+    };
+  }
+
+  // Read the corresponding .md file
+  const filePath = join(DOCS_DIR, `${path}.md`);
 
   try {
-    const stat = statSync(fullPath);
+    const file = Bun.file(filePath);
 
-    if (stat.isDirectory()) {
-      const contents = await scanDirectory(path);
+    if (!existsSync(filePath)) {
       return {
         contents: [
           {
             uri: uri.toString(),
-            mimeType: 'text/directory',
-            text: JSON.stringify(
-              {
-                path: path,
-                entries: contents.resources,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    } else {
-      const file = Bun.file(fullPath);
-
-      if (file.size > MAX_FILE_SIZE) {
-        return {
-          contents: [
-            {
-              uri: uri.toString(),
-              mimeType: 'text/plain',
-              text: `[File too large: ${(file.size / 1024).toFixed(2)}KB]`,
-            },
-          ],
-        };
-      }
-
-      const content = await file.text();
-      return {
-        contents: [
-          {
-            uri: uri.toString(),
-            mimeType: file.type || 'application/x-unknown',
-            text: content,
+            mimeType: 'text/plain',
+            text: `[File not found: ${path}.md]`,
           },
         ],
       };
     }
+
+    const content = await file.text();
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/markdown',
+          text: content,
+        },
+      ],
+    };
   } catch (error) {
     return {
       contents: [
         {
           uri: uri.toString(),
           mimeType: 'text/plain',
-          text: `[Resource error: ${error instanceof Error ? error.message : 'Resource not found'}]`,
+          text: `[File error: ${error instanceof Error ? error.message : 'Unknown error'}]`,
         },
       ],
     };
@@ -407,8 +423,8 @@ async function handleResourceRequest(
 
 const resourceTemplate = new ResourceTemplate('buncument://{+path}', {
   list: async () => {
-    // List callback doesn't receive variables, only return root directory
-    return await scanDirectory();
+    // Return all pages from nav.ts
+    return await getAllPagesResources();
   },
 });
 
@@ -416,8 +432,8 @@ server.registerResource(
   'bun-docs',
   resourceTemplate,
   {
-    description: `Bun documentation directories: ${ROOT_DIRECTORIES.join(', ')}`,
-    mimeType: 'text/directory',
+    description: `Bun documentation with ${PAGE_COUNT} pages from nav.ts`,
+    mimeType: 'application/json',
   },
   handleResourceRequest
 );
