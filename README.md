@@ -12,6 +12,7 @@ A MCP server that provides [Bun](https://bun.com) documentation to AI assistants
 ## 🚀 Quick Start
 
 If you're already in a Bun project, you can try this prompt from bun project template first:
+
 > Read the Bun API docs in `node_modules/bun-types/docs/**.md`.
 
 For more reliable access and search capabilities, install this MCP server:
@@ -19,19 +20,18 @@ For more reliable access and search capabilities, install this MCP server:
 ### 📦 Installation
 
 **Claude Code:**
+
 ```bash
 # Standard installation (uses your local Bun docs)
-claude mcp add bun-doc-mcp bunx -- bun-doc-mcp
-
-# GitHub-only mode (always fetch from upstream)
-claude mcp add bun-doc-mcp bunx -- bun-doc-mcp --github-only
+claude mcp add bun-docs bunx bun-doc-mcp
 ```
 
 **Manual configuration:**
+
 ```json
 {
   "mcpServers": {
-    "bun-doc-mcp": {
+    "bun-docs": {
       "type": "stdio",
       "command": "bunx",
       "args": ["bun-doc-mcp"],
@@ -40,14 +40,14 @@ claude mcp add bun-doc-mcp bunx -- bun-doc-mcp --github-only
   }
 }
 ```
-Set `args: ["bun-doc-mcp", "--github-only"]` if you want.
 
 🎉 You're Ready! Happy coding with Bun! 🚀
 
 ### 🔧 Usage
 
 Once installed, your AI assistant can:
+
 - Access comprehensive Bun documentation
-- Suggest appropriate Bun APIs over Node.js alternatives  
+- Suggest appropriate Bun APIs over Node.js alternatives
 - Help with Bun-specific features and best practices
 - Provide accurate answers based on current documentation
