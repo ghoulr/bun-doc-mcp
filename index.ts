@@ -180,9 +180,63 @@ const PAGE_MAP = await parseNavigation();
 
 // Helper functions
 
+// Parse YAML frontmatter from markdown content
+function parseFrontmatter(content: string): {
+  name?: string;
+  description?: string;
+} {
+  const lines = content.split('\n');
+  if (lines[0] !== '---') return {};
+
+  const frontmatter: Record<string, string> = {};
+  let i = 1;
+  while (i < lines.length && lines[i] !== '---') {
+    const line = lines[i];
+    if (line) {
+      const match = line.match(/^(\w+):\s*(.*)$/);
+      if (match && match[1] && match[2]) {
+        frontmatter[match[1]] = match[2];
+      }
+    }
+    i++;
+  }
+
+  return {
+    name: frontmatter.name,
+    description: frontmatter.description,
+  };
+}
+
+// Get all guides subdirectories
+async function getGuidesSubdirs(): Promise<string[]> {
+  const guidesDir = join(DOCS_DIR, 'guides');
+  if (!existsSync(guidesDir)) return [];
+
+  const entries = await Bun.$`ls -d ${guidesDir}/*/`.text();
+  return entries
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((path) => path.replace(guidesDir + '/', '').replace('/', ''));
+}
+
+// Get all ecosystem files
+async function getEcosystemFiles(): Promise<string[]> {
+  const ecosystemDir = join(DOCS_DIR, 'ecosystem');
+  if (!existsSync(ecosystemDir)) return [];
+
+  const entries = await Bun.$`ls ${ecosystemDir}/*.md`.text();
+  return entries
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((path) => path.replace(ecosystemDir + '/', '').replace('.md', ''));
+}
+
 async function getAllPagesResources(): Promise<{ resources: Resource[] }> {
   const resources: Resource[] = [];
 
+  // Add nav.ts pages
   for (const [slug, pageInfo] of PAGE_MAP) {
     // Skip disabled pages
     if (pageInfo.disabled) continue;
@@ -198,6 +252,35 @@ async function getAllPagesResources(): Promise<{ resources: Resource[] }> {
       description: description,
       mimeType: 'text/markdown',
     });
+  }
+
+  // Add guides directory
+  resources.push({
+    uri: 'buncument://guides',
+    name: 'Guides',
+    description:
+      'A collection of code samples and walkthroughs for performing common tasks with Bun.',
+    mimeType: 'application/json',
+  });
+
+  // Add ecosystem files
+  try {
+    const ecosystemFiles = await getEcosystemFiles();
+    for (const filename of ecosystemFiles) {
+      const filePath = join(DOCS_DIR, 'ecosystem', `${filename}.md`);
+      const file = Bun.file(filePath);
+      const content = await file.text();
+      const firstLine = content.split('\n')[0] || filename;
+
+      resources.push({
+        uri: `buncument://ecosystem/${filename}`,
+        name: filename.charAt(0).toUpperCase() + filename.slice(1),
+        description: firstLine.substring(0, 100),
+        mimeType: 'text/markdown',
+      });
+    }
+  } catch (error) {
+    console.error('Failed to load ecosystem files:', error);
   }
 
   return { resources };
@@ -231,24 +314,21 @@ async function grepDocuments(
     throw new Error(`Invalid regular expression: ${pattern}`);
   }
 
-  // Get all slugs from nav.ts
+  // Search in nav.ts pages
   const slugsToSearch = Array.from(PAGE_MAP.keys());
-
-  // Filter by searchPath if provided
   const filteredSlugs = searchPath
     ? slugsToSearch.filter((slug) => slug.startsWith(searchPath))
     : slugsToSearch;
 
-  // Search only in files mentioned in nav.ts
   for (const slug of filteredSlugs) {
     const pageInfo = PAGE_MAP.get(slug);
     if (!pageInfo || pageInfo.disabled || pageInfo.href) {
-      continue; // Skip disabled pages and external links
+      continue;
     }
 
     const filePath = join(DOCS_DIR, `${slug}.md`);
     if (!existsSync(filePath)) {
-      continue; // Skip if file doesn't exist
+      continue;
     }
 
     const matchCount = await countMatches(filePath, regex);
@@ -257,6 +337,53 @@ async function grepDocuments(
         uri: `buncument://${slug}`,
         matchCount,
       });
+    }
+  }
+
+  // Search in guides if path matches or no path specified
+  if (!searchPath || searchPath.startsWith('guides')) {
+    const guidesDir = join(DOCS_DIR, 'guides');
+    if (existsSync(guidesDir)) {
+      const subdirs = await getGuidesSubdirs();
+
+      for (const subdir of subdirs) {
+        const subdirPath = join(guidesDir, subdir);
+        const files = await Bun.$`ls ${subdirPath}/*.md`.text().catch(() => '');
+
+        for (const filePath of files.trim().split('\n').filter(Boolean)) {
+          const matchCount = await countMatches(filePath, regex);
+          if (matchCount > 0) {
+            const relativePath = filePath
+              .replace(DOCS_DIR + '/', '')
+              .replace('.md', '');
+            results.push({
+              uri: `buncument://${relativePath}`,
+              matchCount,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Search in ecosystem if path matches or no path specified
+  if (!searchPath || searchPath.startsWith('ecosystem')) {
+    const ecosystemDir = join(DOCS_DIR, 'ecosystem');
+    if (existsSync(ecosystemDir)) {
+      const files = await Bun.$`ls ${ecosystemDir}/*.md`.text().catch(() => '');
+
+      for (const filePath of files.trim().split('\n').filter(Boolean)) {
+        const matchCount = await countMatches(filePath, regex);
+        if (matchCount > 0) {
+          const relativePath = filePath
+            .replace(DOCS_DIR + '/', '')
+            .replace('.md', '');
+          results.push({
+            uri: `buncument://${relativePath}`,
+            matchCount,
+          });
+        }
+      }
     }
   }
 
@@ -341,7 +468,168 @@ async function handleResourceRequest(
     };
   }
 
-  // Handle specific page paths
+  // Handle guides directory
+  if (path === 'guides') {
+    const subdirs = await getGuidesSubdirs();
+    const resources: Resource[] = [];
+
+    for (const subdir of subdirs) {
+      const indexPath = join(DOCS_DIR, 'guides', subdir, 'index.json');
+      if (existsSync(indexPath)) {
+        try {
+          const indexFile = Bun.file(indexPath);
+          const indexData = await indexFile.json();
+          resources.push({
+            uri: `buncument://guides/${subdir}`,
+            name: indexData.name || subdir,
+            description: indexData.description || '',
+            mimeType: 'application/json',
+          });
+        } catch (error) {
+          console.error(`Failed to read ${indexPath}:`, error);
+        }
+      }
+    }
+
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'application/json',
+          text: JSON.stringify(
+            {
+              path: 'guides',
+              entries: resources,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  // Handle guides subdirectory
+  if (path.startsWith('guides/')) {
+    const parts = path.split('/');
+
+    // Handle guides/subdir (list files in subdir)
+    if (parts.length === 2 && parts[1]) {
+      const subdir = parts[1];
+      const subdirPath = join(DOCS_DIR, 'guides', subdir);
+
+      if (!existsSync(subdirPath)) {
+        return {
+          contents: [
+            {
+              uri: uri.toString(),
+              mimeType: 'text/plain',
+              text: `[Directory not found: ${path}]`,
+            },
+          ],
+        };
+      }
+
+      // Get all .md files in the subdirectory
+      const files = await Bun.$`ls ${subdirPath}/*.md`.text().catch(() => '');
+      const resources: Resource[] = [];
+
+      for (const filePath of files.trim().split('\n').filter(Boolean)) {
+        const filename = filePath
+          .replace(subdirPath + '/', '')
+          .replace('.md', '');
+        const file = Bun.file(filePath);
+        const content = await file.text();
+        const frontmatter = parseFrontmatter(content);
+
+        resources.push({
+          uri: `buncument://guides/${subdir}/${filename}`,
+          name: frontmatter.name || filename,
+          description: frontmatter.description || '',
+          mimeType: 'text/markdown',
+        });
+      }
+
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: 'application/json',
+            text: JSON.stringify(
+              {
+                path: path,
+                entries: resources,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Handle guides/subdir/file (return file content)
+    if (parts.length === 3) {
+      const filePath = join(DOCS_DIR, `${path}.md`);
+
+      if (!existsSync(filePath)) {
+        return {
+          contents: [
+            {
+              uri: uri.toString(),
+              mimeType: 'text/plain',
+              text: `[File not found: ${path}.md]`,
+            },
+          ],
+        };
+      }
+
+      const file = Bun.file(filePath);
+      const content = await file.text();
+
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: 'text/markdown',
+            text: content,
+          },
+        ],
+      };
+    }
+  }
+
+  // Handle ecosystem files
+  if (path.startsWith('ecosystem/')) {
+    const filePath = join(DOCS_DIR, `${path}.md`);
+
+    if (!existsSync(filePath)) {
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: 'text/plain',
+            text: `[File not found: ${path}.md]`,
+          },
+        ],
+      };
+    }
+
+    const file = Bun.file(filePath);
+    const content = await file.text();
+
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/markdown',
+          text: content,
+        },
+      ],
+    };
+  }
+
+  // Handle specific page paths from nav.ts
   const pageInfo = PAGE_MAP.get(path);
   if (!pageInfo) {
     return {
@@ -482,11 +770,12 @@ Examples:
   }
 );
 
-if (process.stdout.isTTY !== undefined) {
+if (process.stdout.isTTY === true) {
   console.log(
-    `Bun documents cached in ${DOCS_DIR}, please attach by a MCP client, exiting...`
+    `Bun documents cached in ${DOCS_DIR}, please attach by a MCP client.`
   );
   process.exit(0);
 }
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
