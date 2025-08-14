@@ -53,6 +53,27 @@ After making code changes that affect MCP functionality:
    - Test resource reading
    - Test directory browsing
 
+### Command-line Testing
+
+Since the bash tool doesn't have TTY, use JSON-RPC protocol for testing:
+
+```bash
+# Test resource listing
+echo '{"jsonrpc":"2.0","method":"resources/list","params":{},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.resources | length'
+
+# Test search functionality
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","arguments":{"pattern":"WebSocket"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text'
+
+# Test search with path filter
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","arguments":{"pattern":"WebSocket","path":"api/"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text'
+
+# Test resource reading
+echo '{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"buncument://api/websockets"},"id":1}' | bun run index.ts 2>/dev/null | jq -r '.result.contents[0].text' | head -20
+
+# Check initialization output (use timeout to avoid hanging)
+timeout 1s bun run index.ts 2>&1 | grep -E "\\[Indexing\\]|\\[Warning\\]"
+```
+
 ## Important Notes
 
 - Always consult Bun documentation before making modifications

@@ -11,14 +11,11 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { $ } from 'bun';
 import { homedir } from 'node:os';
 
-// Import version as a compile-time macro - executed at bundle-time, zero runtime overhead
 import { getPackageVersion } from './macros.ts' with { type: 'macro' };
 const VERSION = await getPackageVersion();
 
-// Constants
 const DEFAULT_SEARCH_LIMIT = 30;
 
-// Type definitions
 type Resource = {
   uri: string;
   name: string;
@@ -26,12 +23,16 @@ type Resource = {
   mimeType: string;
 };
 
+type IndexedResource = Resource & {
+  filePath?: string;
+  isDirectory?: boolean;
+};
+
 type SearchResult = {
   uri: string;
   matchCount: number;
 };
 
-// Nav.ts type definitions
 type NavPage = {
   type: 'page';
   slug: string;
@@ -63,6 +64,14 @@ type PageInfo = {
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log(VERSION);
   process.exit(0);
+}
+
+function print(s: string): boolean {
+  if (process.stdout.isTTY === true) {
+    console.log(s);
+    return true;
+  }
+  return false;
 }
 
 async function downloadDocsFromGitHub(
@@ -144,6 +153,10 @@ async function initializeDocsDir(): Promise<string> {
 
 const DOCS_DIR = await initializeDocsDir();
 
+// Global resource index
+const RESOURCE_INDEX = new Map<string, IndexedResource>();
+let TOTAL_RESOURCE_COUNT = 0;
+
 // Parse nav.ts to build page mapping
 async function parseNavigation(): Promise<Map<string, PageInfo>> {
   const navPath = join(DOCS_DIR, 'nav.ts');
@@ -178,9 +191,147 @@ async function parseNavigation(): Promise<Map<string, PageInfo>> {
 
 const PAGE_MAP = await parseNavigation();
 
-// Helper functions
+async function buildResourceIndex(): Promise<void> {
+  let navIndexed = 0;
+  let navMissing = 0;
+  for (const [slug, pageInfo] of PAGE_MAP.entries()) {
+    if (pageInfo.disabled || pageInfo.href) {
+      continue;
+    }
 
-// Parse YAML frontmatter from markdown content
+    let filePath = join(DOCS_DIR, `${slug}.md`);
+    if (!existsSync(filePath)) {
+      const indexPath = join(DOCS_DIR, slug, 'index.md');
+      if (existsSync(indexPath)) {
+        filePath = indexPath;
+      } else {
+        navMissing++;
+        continue;
+      }
+    }
+
+    const description =
+      pageInfo.divider && pageInfo.description
+        ? `${pageInfo.divider} / ${pageInfo.description}`
+        : pageInfo.description || pageInfo.divider || '';
+
+    RESOURCE_INDEX.set(`buncument://${slug}`, {
+      uri: `buncument://${slug}`,
+      name: pageInfo.title,
+      description: description,
+      mimeType: 'text/markdown',
+      filePath: filePath,
+    });
+    navIndexed++;
+  }
+  print(
+    `Indexed ${navIndexed} nav pages${navMissing > 0 ? ` (${navMissing} missing)` : ''}`
+  );
+
+  const guidesDir = join(DOCS_DIR, 'guides');
+  let guidesIndexed = 0;
+  if (existsSync(guidesDir)) {
+    RESOURCE_INDEX.set('buncument://guides', {
+      uri: 'buncument://guides',
+      name: 'Guides',
+      description:
+        'A collection of code samples and walkthroughs for performing common tasks with Bun.',
+      mimeType: 'application/json',
+      isDirectory: true,
+    });
+
+    const allFiles =
+      await Bun.$`find ${guidesDir} -type f -name "*.md" 2>/dev/null`
+        .text()
+        .catch(() => '');
+    for (const filePath of allFiles.trim().split('\n').filter(Boolean)) {
+      const relativePath = filePath
+        .replace(DOCS_DIR + '/', '')
+        .replace('.md', '');
+      const file = Bun.file(filePath);
+      const content = await file.text();
+      const frontmatter = parseFrontmatter(content);
+      const filename = filePath.split('/').pop()?.replace('.md', '') || '';
+      const firstLine = content.split('\n')[0] || '';
+
+      RESOURCE_INDEX.set(`buncument://${relativePath}`, {
+        uri: `buncument://${relativePath}`,
+        name: frontmatter.name || filename,
+        description:
+          frontmatter.description || firstLine.substring(0, 100) || '',
+        mimeType: 'text/markdown',
+        filePath: filePath,
+      });
+      guidesIndexed++;
+    }
+
+    const subdirs =
+      await Bun.$`find ${guidesDir} -mindepth 1 -type d 2>/dev/null`
+        .text()
+        .catch(() => '');
+    for (const dirPath of subdirs.trim().split('\n').filter(Boolean)) {
+      const relativePath = dirPath.replace(DOCS_DIR + '/', '');
+      const pathParts = dirPath.split('/');
+      const dirname = pathParts[pathParts.length - 1] || '';
+      const indexPath = join(dirPath, 'index.json');
+      let dirName = dirname;
+      let dirDescription = 'Directory';
+
+      if (existsSync(indexPath)) {
+        try {
+          const indexFile = Bun.file(indexPath);
+          const indexData = await indexFile.json();
+          dirName = indexData.name || dirname;
+          dirDescription = indexData.description || 'Directory';
+        } catch {
+          // Use default values if index.json cannot be read
+        }
+      }
+
+      RESOURCE_INDEX.set(`buncument://${relativePath}`, {
+        uri: `buncument://${relativePath}`,
+        name: dirName,
+        description: dirDescription,
+        mimeType: 'application/json',
+        isDirectory: true,
+      });
+    }
+  }
+  print(`Indexed ${guidesIndexed} guides files`);
+
+  const ecosystemDir = join(DOCS_DIR, 'ecosystem');
+  let ecosystemIndexed = 0;
+  if (existsSync(ecosystemDir)) {
+    const allFiles =
+      await Bun.$`find ${ecosystemDir} -type f -name "*.md" 2>/dev/null`
+        .text()
+        .catch(() => '');
+    for (const filePath of allFiles.trim().split('\n').filter(Boolean)) {
+      const relativePath = filePath
+        .replace(DOCS_DIR + '/', '')
+        .replace('.md', '');
+      const filename = filePath.split('/').pop()?.replace('.md', '') || '';
+      const file = Bun.file(filePath);
+      const content = await file.text();
+      const firstLine = content.split('\n')[0] || filename;
+
+      RESOURCE_INDEX.set(`buncument://${relativePath}`, {
+        uri: `buncument://${relativePath}`,
+        name: filename.charAt(0).toUpperCase() + filename.slice(1),
+        description: firstLine.substring(0, 100),
+        mimeType: 'text/markdown',
+        filePath: filePath,
+      });
+      ecosystemIndexed++;
+    }
+  }
+  print(`Indexed ${ecosystemIndexed} ecosystem files`);
+
+  TOTAL_RESOURCE_COUNT = RESOURCE_INDEX.size;
+  print(`Total indexed resources: ${TOTAL_RESOURCE_COUNT}`);
+}
+
+await buildResourceIndex();
 function parseFrontmatter(content: string): {
   name?: string;
   description?: string;
@@ -207,80 +358,28 @@ function parseFrontmatter(content: string): {
   };
 }
 
-// Get all guides subdirectories
-async function getGuidesSubdirs(): Promise<string[]> {
-  const guidesDir = join(DOCS_DIR, 'guides');
-  if (!existsSync(guidesDir)) return [];
-
-  const entries = await Bun.$`ls -d ${guidesDir}/*/`.text();
-  return entries
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map((path) => path.replace(guidesDir + '/', '').replace('/', ''));
-}
-
-// Get all ecosystem files
-async function getEcosystemFiles(): Promise<string[]> {
-  const ecosystemDir = join(DOCS_DIR, 'ecosystem');
-  if (!existsSync(ecosystemDir)) return [];
-
-  const entries = await Bun.$`ls ${ecosystemDir}/*.md`.text();
-  return entries
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map((path) => path.replace(ecosystemDir + '/', '').replace('.md', ''));
-}
-
-async function getAllPagesResources(): Promise<{ resources: Resource[] }> {
+function getAllPagesResources(): { resources: Resource[] } {
   const resources: Resource[] = [];
 
-  // Add nav.ts pages
-  for (const [slug, pageInfo] of PAGE_MAP) {
-    // Skip disabled pages
-    if (pageInfo.disabled) continue;
+  for (const [uri, resource] of RESOURCE_INDEX.entries()) {
+    const path = uri.replace('buncument://', '');
 
-    const description =
-      pageInfo.divider && pageInfo.description
-        ? `${pageInfo.divider} / ${pageInfo.description}`
-        : pageInfo.description || pageInfo.divider || '';
-
-    resources.push({
-      uri: `buncument://${slug}`,
-      name: pageInfo.title,
-      description: description,
-      mimeType: 'text/markdown',
-    });
-  }
-
-  // Add guides directory
-  resources.push({
-    uri: 'buncument://guides',
-    name: 'Guides',
-    description:
-      'A collection of code samples and walkthroughs for performing common tasks with Bun.',
-    mimeType: 'application/json',
-  });
-
-  // Add ecosystem files
-  try {
-    const ecosystemFiles = await getEcosystemFiles();
-    for (const filename of ecosystemFiles) {
-      const filePath = join(DOCS_DIR, 'ecosystem', `${filename}.md`);
-      const file = Bun.file(filePath);
-      const content = await file.text();
-      const firstLine = content.split('\n')[0] || filename;
-
+    // Include: nav pages, guides directory, top-level ecosystem files
+    // Exclude: guides subdirectories and files
+    if (
+      path === 'guides' ||
+      (!path.startsWith('guides/') &&
+        (path.startsWith('ecosystem/')
+          ? path.split('/').length === 2
+          : !resource.isDirectory))
+    ) {
       resources.push({
-        uri: `buncument://ecosystem/${filename}`,
-        name: filename.charAt(0).toUpperCase() + filename.slice(1),
-        description: firstLine.substring(0, 100),
-        mimeType: 'text/markdown',
+        uri: resource.uri,
+        name: resource.name,
+        description: resource.description,
+        mimeType: resource.mimeType,
       });
     }
-  } catch (error) {
-    console.error('Failed to load ecosystem files:', error);
   }
 
   return { resources };
@@ -314,84 +413,29 @@ async function grepDocuments(
     throw new Error(`Invalid regular expression: ${pattern}`);
   }
 
-  // Search in nav.ts pages
-  const slugsToSearch = Array.from(PAGE_MAP.keys());
-  const filteredSlugs = searchPath
-    ? slugsToSearch.filter((slug) => slug.startsWith(searchPath))
-    : slugsToSearch;
-
-  for (const slug of filteredSlugs) {
-    const pageInfo = PAGE_MAP.get(slug);
-    if (!pageInfo || pageInfo.disabled || pageInfo.href) {
+  for (const [uri, resource] of RESOURCE_INDEX.entries()) {
+    if (resource.isDirectory || !resource.filePath) {
       continue;
     }
 
-    const filePath = join(DOCS_DIR, `${slug}.md`);
-    if (!existsSync(filePath)) {
-      continue;
+    if (searchPath) {
+      const resourcePath = uri.replace('buncument://', '');
+      if (!resourcePath.startsWith(searchPath)) {
+        continue;
+      }
     }
 
-    const matchCount = await countMatches(filePath, regex);
+    const matchCount = await countMatches(resource.filePath, regex);
     if (matchCount > 0) {
       results.push({
-        uri: `buncument://${slug}`,
+        uri: resource.uri,
         matchCount,
       });
     }
   }
 
-  // Search in guides if path matches or no path specified
-  if (!searchPath || searchPath.startsWith('guides')) {
-    const guidesDir = join(DOCS_DIR, 'guides');
-    if (existsSync(guidesDir)) {
-      const subdirs = await getGuidesSubdirs();
-
-      for (const subdir of subdirs) {
-        const subdirPath = join(guidesDir, subdir);
-        const files = await Bun.$`ls ${subdirPath}/*.md`.text().catch(() => '');
-
-        for (const filePath of files.trim().split('\n').filter(Boolean)) {
-          const matchCount = await countMatches(filePath, regex);
-          if (matchCount > 0) {
-            const relativePath = filePath
-              .replace(DOCS_DIR + '/', '')
-              .replace('.md', '');
-            results.push({
-              uri: `buncument://${relativePath}`,
-              matchCount,
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // Search in ecosystem if path matches or no path specified
-  if (!searchPath || searchPath.startsWith('ecosystem')) {
-    const ecosystemDir = join(DOCS_DIR, 'ecosystem');
-    if (existsSync(ecosystemDir)) {
-      const files = await Bun.$`ls ${ecosystemDir}/*.md`.text().catch(() => '');
-
-      for (const filePath of files.trim().split('\n').filter(Boolean)) {
-        const matchCount = await countMatches(filePath, regex);
-        if (matchCount > 0) {
-          const relativePath = filePath
-            .replace(DOCS_DIR + '/', '')
-            .replace('.md', '');
-          results.push({
-            uri: `buncument://${relativePath}`,
-            matchCount,
-          });
-        }
-      }
-    }
-  }
-
   return results.sort((a, b) => b.matchCount - a.matchCount).slice(0, limit);
 }
-
-// Get page count for description
-const PAGE_COUNT = PAGE_MAP.size;
 
 const server = new McpServer(
   {
@@ -433,23 +477,14 @@ const server = new McpServer(
   }
 );
 
-async function handleResourceRequest(
-  uri: URL,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  variables: Record<string, string | string[]>
-) {
-  // Extract path from URI: hostname + pathname
-  // e.g., buncument://api/websockets.md -> api/websockets.md
+async function handleResourceRequest(uri: URL) {
   let path = uri.hostname + uri.pathname;
-
-  // Remove leading slash from pathname if present
   if (path.startsWith('/')) {
     path = path.slice(1);
   }
 
-  // Handle root path - return all pages
   if (!path || path === '') {
-    const contents = await getAllPagesResources();
+    const contents = getAllPagesResources();
     return {
       contents: [
         {
@@ -468,25 +503,35 @@ async function handleResourceRequest(
     };
   }
 
-  // Handle guides directory
-  if (path === 'guides') {
-    const subdirs = await getGuidesSubdirs();
-    const resources: Resource[] = [];
+  const resourceUri = `buncument://${path}`;
+  const indexedResource = RESOURCE_INDEX.get(resourceUri);
 
-    for (const subdir of subdirs) {
-      const indexPath = join(DOCS_DIR, 'guides', subdir, 'index.json');
-      if (existsSync(indexPath)) {
-        try {
-          const indexFile = Bun.file(indexPath);
-          const indexData = await indexFile.json();
+  if (!indexedResource) {
+    return {
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: 'text/plain',
+          text: `[Resource not found: ${path}]`,
+        },
+      ],
+    };
+  }
+
+  if (indexedResource.isDirectory) {
+    const resources: Resource[] = [];
+    const pathPrefix = `buncument://${path}/`;
+
+    for (const [childUri, childResource] of RESOURCE_INDEX.entries()) {
+      if (childUri.startsWith(pathPrefix)) {
+        const relativePath = childUri.replace(pathPrefix, '');
+        if (!relativePath.includes('/')) {
           resources.push({
-            uri: `buncument://guides/${subdir}`,
-            name: indexData.name || subdir,
-            description: indexData.description || '',
-            mimeType: 'application/json',
+            uri: childResource.uri,
+            name: childResource.name,
+            description: childResource.description,
+            mimeType: childResource.mimeType,
           });
-        } catch (error) {
-          console.error(`Failed to read ${indexPath}:`, error);
         }
       }
     }
@@ -498,7 +543,7 @@ async function handleResourceRequest(
           mimeType: 'application/json',
           text: JSON.stringify(
             {
-              path: 'guides',
+              path: path,
               entries: resources,
             },
             null,
@@ -509,219 +554,52 @@ async function handleResourceRequest(
     };
   }
 
-  // Handle guides subdirectory
-  if (path.startsWith('guides/')) {
-    const parts = path.split('/');
-
-    // Handle guides/subdir (list files in subdir)
-    if (parts.length === 2 && parts[1]) {
-      const subdir = parts[1];
-      const subdirPath = join(DOCS_DIR, 'guides', subdir);
-
-      if (!existsSync(subdirPath)) {
-        return {
-          contents: [
-            {
-              uri: uri.toString(),
-              mimeType: 'text/plain',
-              text: `[Directory not found: ${path}]`,
-            },
-          ],
-        };
-      }
-
-      // Get all .md files in the subdirectory
-      const files = await Bun.$`ls ${subdirPath}/*.md`.text().catch(() => '');
-      const resources: Resource[] = [];
-
-      for (const filePath of files.trim().split('\n').filter(Boolean)) {
-        const filename = filePath
-          .replace(subdirPath + '/', '')
-          .replace('.md', '');
-        const file = Bun.file(filePath);
-        const content = await file.text();
-        const frontmatter = parseFrontmatter(content);
-
-        resources.push({
-          uri: `buncument://guides/${subdir}/${filename}`,
-          name: frontmatter.name || filename,
-          description: frontmatter.description || '',
-          mimeType: 'text/markdown',
-        });
-      }
-
-      return {
-        contents: [
-          {
-            uri: uri.toString(),
-            mimeType: 'application/json',
-            text: JSON.stringify(
-              {
-                path: path,
-                entries: resources,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-
-    // Handle guides/subdir/file (return file content)
-    if (parts.length === 3) {
-      const filePath = join(DOCS_DIR, `${path}.md`);
-
-      if (!existsSync(filePath)) {
-        return {
-          contents: [
-            {
-              uri: uri.toString(),
-              mimeType: 'text/plain',
-              text: `[File not found: ${path}.md]`,
-            },
-          ],
-        };
-      }
-
-      const file = Bun.file(filePath);
+  if (indexedResource.filePath) {
+    try {
+      const file = Bun.file(indexedResource.filePath);
       const content = await file.text();
-
       return {
         contents: [
           {
             uri: uri.toString(),
-            mimeType: 'text/markdown',
+            mimeType: indexedResource.mimeType,
             text: content,
           },
         ],
       };
-    }
-  }
-
-  // Handle ecosystem files
-  if (path.startsWith('ecosystem/')) {
-    const filePath = join(DOCS_DIR, `${path}.md`);
-
-    if (!existsSync(filePath)) {
+    } catch (error) {
       return {
         contents: [
           {
             uri: uri.toString(),
             mimeType: 'text/plain',
-            text: `[File not found: ${path}.md]`,
+            text: `[File error: ${error instanceof Error ? error.message : 'Unknown error'}]`,
           },
         ],
       };
     }
-
-    const file = Bun.file(filePath);
-    const content = await file.text();
-
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/markdown',
-          text: content,
-        },
-      ],
-    };
   }
 
-  // Handle specific page paths from nav.ts
-  const pageInfo = PAGE_MAP.get(path);
-  if (!pageInfo) {
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/plain',
-          text: `[Page not found: ${path}]`,
-        },
-      ],
-    };
-  }
-
-  // Check if page is disabled
-  if (pageInfo.disabled) {
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/plain',
-          text: `[Page disabled: ${pageInfo.title}]`,
-        },
-      ],
-    };
-  }
-
-  // Check if page has external href
-  if (pageInfo.href) {
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/plain',
-          text: `[External link: ${pageInfo.href}]`,
-        },
-      ],
-    };
-  }
-
-  // Read the corresponding .md file
-  const filePath = join(DOCS_DIR, `${path}.md`);
-
-  try {
-    const file = Bun.file(filePath);
-
-    if (!existsSync(filePath)) {
-      return {
-        contents: [
-          {
-            uri: uri.toString(),
-            mimeType: 'text/plain',
-            text: `[File not found: ${path}.md]`,
-          },
-        ],
-      };
-    }
-
-    const content = await file.text();
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/markdown',
-          text: content,
-        },
-      ],
-    };
-  } catch (error) {
-    return {
-      contents: [
-        {
-          uri: uri.toString(),
-          mimeType: 'text/plain',
-          text: `[File error: ${error instanceof Error ? error.message : 'Unknown error'}]`,
-        },
-      ],
-    };
-  }
+  return {
+    contents: [
+      {
+        uri: uri.toString(),
+        mimeType: 'text/plain',
+        text: `[No file path for resource: ${path}]`,
+      },
+    ],
+  };
 }
 
 const resourceTemplate = new ResourceTemplate('buncument://{+path}', {
-  list: async () => {
-    // Return all pages from nav.ts
-    return await getAllPagesResources();
-  },
+  list: () => getAllPagesResources(),
 });
 
 server.registerResource(
   'bun-docs',
   resourceTemplate,
   {
-    description: `Bun documentation with ${PAGE_COUNT} pages from nav.ts`,
+    description: `Bun documentation with ${TOTAL_RESOURCE_COUNT} indexed resources`,
     mimeType: 'application/json',
   },
   handleResourceRequest
@@ -770,10 +648,9 @@ Examples:
   }
 );
 
-if (process.stdout.isTTY === true) {
-  console.log(
-    `Bun documents cached in ${DOCS_DIR}, please attach by a MCP client.`
-  );
+if (
+  print(`Bun documents cached in ${DOCS_DIR}, please attach by a MCP client.`)
+) {
   process.exit(0);
 }
 
