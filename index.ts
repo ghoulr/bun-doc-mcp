@@ -85,6 +85,7 @@ async function downloadDocsFromGitHub(
     mkdirSync(dirname(targetDir), { recursive: true });
 
     await cleanupTemp();
+    console.error(`Downloading Bun documents for ${gitTag}`);
     await $`git clone --filter=blob:none --sparse --depth 1 --branch ${gitTag} ${repoUrl} ${tempDir}`.quiet();
     await $`cd ${tempDir} && git sparse-checkout set docs`.quiet();
 
@@ -481,5 +482,11 @@ Examples:
   }
 );
 
+if (process.stdout.isTTY !== undefined) {
+  console.log(
+    `Bun documents cached in ${DOCS_DIR}, please attach by a MCP client, exiting...`
+  );
+  process.exit(0);
+}
 const transport = new StdioServerTransport();
 await server.connect(transport);

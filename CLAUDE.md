@@ -4,27 +4,38 @@ This is a Model Context Protocol (MCP) server that provides access to Bun docume
 
 ## Project Overview
 
-This MCP server acts as a file system proxy for the Bun documentation located in `node_modules/bun-types/docs/`. It allows AI assistants to browse and read Bun documentation progressively, reducing unnecessary information transfer.
+This MCP server downloads Bun documentation from GitHub and provides access through a file system-like interface. It automatically caches documentation locally and allows AI assistants to browse and read Bun documentation progressively, reducing unnecessary information transfer.
 
 ## Technical Decisions
 
 ### Project Structure
+
 - Single `index.ts` implementation
-- Minimal dependencies, only depened on `@modelcontextprotocol/sdk`
+- Minimal dependencies: `@modelcontextprotocol/sdk` and `zod`
 
 ### URI Format
+
 - Uses creative scheme name: `buncument://` (bun + document)
 - Files keep their extensions: `buncument://quickstart.md`
 - Directories have no special markers: `buncument://api`
 - Follows standard file system conventions
 
+### Documentation Source
+
+- Downloads from GitHub using git sparse checkout for efficiency
+- Automatically caches in `$HOME/.cache/bun-doc-mcp/{version}/docs`
+- Uses `docs/nav.ts` to determine available pages and structure
+
 ### MIME Types
-- Directory typed as `text/directory`
-- Files: Detected automatically using `Bun.file().type`
+
+- Root directory: `application/json` with page listing
+- Documentation files: `text/markdown`
+- Error responses: `text/plain`
 
 ## Development Guidelines
 
 ### Code Style
+
 - Keep responses concise - this is a CLI tool
 - No unnecessary comments in code
 - Follow existing patterns in the codebase
@@ -32,6 +43,7 @@ This MCP server acts as a file system proxy for the Bun documentation located in
 ## Testing Guidelines
 
 ### MCP Server Testing
+
 After making code changes that affect MCP functionality:
 
 1. **User must restart MCP server** - ask user to restart
