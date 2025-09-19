@@ -13,12 +13,11 @@ This MCP server downloads Bun documentation from GitHub and provides access thro
 - Single `index.ts` implementation
 - Minimal dependencies: `@modelcontextprotocol/sdk` and `zod`
 
-### URI Format
+### Documentation Slugs
 
-- Uses creative scheme name: `buncument://` (bun + document)
-- Files keep their extensions: `buncument://quickstart.md`
-- Directories have no special markers: `buncument://api`
-- Follows standard file system conventions
+- Documentation entries are addressed by slug (e.g., `runtime/bun-apis`, `guides/http`)
+- Slugs mirror the Bun docs navigation structure; no custom URI scheme required
+- Markdown files resolve by slug without the `.md` suffix
 
 ### Documentation Source
 
@@ -26,11 +25,10 @@ This MCP server downloads Bun documentation from GitHub and provides access thro
 - Automatically caches in `$HOME/.cache/bun-doc-mcp/{version}/docs`
 - Uses `docs/nav.ts` to determine available pages and structure
 
-### MIME Types
+### MCP Tools
 
-- Root directory: `application/json` with page listing
-- Documentation files: `text/markdown`
-- Error responses: `text/plain`
+- `grep_bun_docs`: regex search over cached documentation with optional path filters and flags
+- `read_bun_doc`: return raw markdown for a documentation slug
 
 ## Development Guidelines
 
@@ -49,29 +47,25 @@ After making code changes that affect MCP functionality:
 1. **User must restart MCP server** - ask user to restart
 2. **Wait for restart confirmation** - Don't proceed until user confirms restart
 3. **Test core functionality** using MCP tools:
-   - Test search
-   - Test resource reading
-   - Test directory browsing
+   - Test `grep_bun_docs`
+   - Test `read_bun_doc`
+   - Add extra checks that make sense for your change; don't stop at the canned examples
 
 ### Command-line Testing
 
 Since the bash tool doesn't have TTY, use JSON-RPC protocol for testing:
 
 ```bash
-# Test resource listing
-echo '{"jsonrpc":"2.0","method":"resources/list","params":{},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.resources | length'
-
 # Test search functionality
-echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","arguments":{"pattern":"WebSocket"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text'
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","arguments":{"pattern":"WebSocket"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text | fromjson | length'
 
-# Test search with path filter
-echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","arguments":{"pattern":"WebSocket","path":"api/"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text'
-
-# Test resource reading
-echo '{"jsonrpc":"2.0","method":"resources/read","params":{"uri":"buncument://api/websockets"},"id":1}' | bun run index.ts 2>/dev/null | jq -r '.result.contents[0].text' | head -20
+# Test reading a document by slug
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_bun_doc","arguments":{"path":"runtime/bun-apis"}},"id":1}' | bun run index.ts 2>/dev/null | jq -r '.result.content[0].text' | head -20
 
 # Check initialization output (use timeout to avoid hanging)
 timeout 1s bun run index.ts 2>&1 | grep -E "\\[Indexing\\]|\\[Warning\\]"
+
+# Add any extra checks relevant to your change (different slugs, regex flags, etc.)
 ```
 
 ## Important Notes
